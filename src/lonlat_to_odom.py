@@ -5,102 +5,60 @@ import rclpy
 import serial
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
-from sensor_msgs.msg import NavSatFix
+from sensor_msgs.msg import Imu, NavSatFix
 
 
-class GPSDataToOdom(Node):
+class lonlat_To_Odom(Node):
     def __init__(self):
         super().__init__('gps_data_acquisition')
 
-        self.declare_parameter('port', '/dev/sensors/GNSSbase')
-        self.declare_parameter('baud', 9600)
-        self.declare_parameter('country_id', 0)
         self.declare_parameter('Position_magnification', 1.675)
-        self.declare_parameter('heading', 180)
+        # self.declare_parameter('heading', 180)
 
-        self.dev_name = self.get_parameter(
-            'port').get_parameter_value().string_value
-        self.serial_baud = self.get_parameter(
-            'baud').get_parameter_value().integer_value
-        self.country_id = self.get_parameter(
-            'country_id').get_parameter_value().integer_value
         self.Position_magnification = self.get_parameter(
             'Position_magnification').get_parameter_value().double_value
-        self.theta = self.get_parameter(
-            'heading').get_parameter_value().double_value
+        # self.theta = self.get_parameter('heading').get_parameter_value().double_value
 
-#        self.create_subscription(Imu, "movingbase/quat", self.movingbase_callback, 1)
-#        self.fix_sub = self.create_subscription(NavSatFix, "fix", self.fix_callback, 10)
+        self.movingase_sub = self.create_subscription(
+            Imu, "movingbase/quat", self.movingbase_callback, 1)
+        self.fix_sub = self.create_subscription(
+            NavSatFix, "fix", self.fix_callback, 10)
+
         self.odom_pub = self.create_publisher(Odometry, "/odom/gps", 10)
         self.odom_msg = Odometry()
 
         self.initial_coordinate = None
         self.fix_data = None
-#        self.count = 0
 
-        self.timer = self.create_timer(1.0 / 3.0, self.publish_GPSodom)
+        self.count = 0
 
-#    def fix_callback(self, data):
-#        self.fix_data = data
+        self.latitude = None
+        self.longitude = None
+        self.satelites = None
+        self.theta = None
 
-#    def movingbase_callback(self, msg):
-#         if self.count == 0:
-#             self.theta = msg.orientation_covariance[0]
-#             self.count = 1
+        self.timer = self.create_timer(1.0 / 3.0, self.publish_lonlat_to_odom)
 
-    def get_gps(self, dev_name, country_id):
-        try:
-            serial_port = serial.Serial(dev_name, self.serial_baud)
-        except serial.SerialException as serialerror:
-            self.get_logger().error(f"Serial error: {serialerror}")
-            return None
+        self.get_logger().info("Start lonlat_to_odom node")
+        self.get_logger().info("-------------------------")
 
-        initial_letters = None
-        if country_id == 0:   # Japan
-            initial_letters = "$GNGGA"
-        elif country_id == 1:  # USA
-            initial_letters = "$GPGGA"
+    def fix_callback(self, data):
+        self.latitude = data.latitude
+        self.longitude = data.longitude
+        self.satelites = data.position_covariance[0]
 
-        while True:
-            line = serial_port.readline().decode('latin-1')
-            gps_data = line.split(',')
-            if gps_data[0] == initial_letters:
-                break
-
-        # self.get_logger().info(f"GPS Data: {gps_data}")
-        Fixtype_data = int(gps_data[6])
-        # self.get_logger().info(f"Fix Type: {Fixtype_data}")
-        if Fixtype_data != 0:
-            satelitecount_data = float(gps_data[7])
-            # self.get_logger().info(f"Satellite Count: {satelitecount_data}")
-            # ddmm.mmmmm to dd.ddddd
-            latitude_data = float(gps_data[2]) / 100.0
-            if gps_data[3] == 'S':  # south
-                latitude_data *= -1
-            # ddmm.mmmmm to dd.ddddd
-            longitude_data = float(gps_data[4]) / 100.0
-            if gps_data[5] == 'W':  # west
-                longitude_data *= -1
-            altitude_data = float(gps_data[9])
-        else:
-            latitude_data = 0
-            longitude_data = 0
-            altitude_data = 0
-            satelitecount_data = 0
-
-        serial_port.close()
-
-        gnggadata = (Fixtype_data, latitude_data, longitude_data,
-                     altitude_data, satelitecount_data)
-        # self.get_logger().info(f"Current Latitude and Longitude (Fixtype, latitude, longitude, altitude): {gnggadata}")
-
-        return gnggadata
+    def movingbase_callback(self, msg):
+        if self.count == 0:
+            self.theta = msg.orientation_covariance[0]
+            self.count = 1
 
     def conversion(self, coordinate, origin, theta):
-        ido = coordinate[1]
-        keido = coordinate[2]
+        ido = coordinate[0]
+        keido = coordinate[1]
         ido0 = origin[0]
         keido0 = origin[1]
+
+        # self.get_logger().info(f"theta: {theta}")
 
         a = 6378137
         f = 35/10439
@@ -158,17 +116,16 @@ class GPSDataToOdom(Node):
 
         return point
 
-    def publish_GPSodom(self):
-        lonlat = self.get_gps(self.dev_name, self.country_id)
-        if lonlat is not None:
-            if lonlat[1] != 0 and lonlat[2] != 0:
+    def publish_lonlat_to_odom(self):
+        lonlat = [self.latitude, self.longitude]
+        if lonlat[0] is not None and lonlat[1] is not None and self.theta is not None:
+            if lonlat[0] != 0 and lonlat[1] != 0:
                 if self.initial_coordinate is None:
-                    self.initial_coordinate = [lonlat[1], lonlat[2]]
+                    self.initial_coordinate = [lonlat[0], lonlat[1]]
                 GPSxy = self.conversion(
                     lonlat, self.initial_coordinate, self.theta)
                 # self.get_logger().info(f"GPSxy: {GPSxy}")
                 # self.get_logger().info(f"lonlat[4]: {lonlat[4]}")
-                satellites = lonlat[4]
 
                 self.odom_msg.header.stamp = self.get_clock().now().to_msg()
                 self.odom_msg.header.frame_id = "odom"
@@ -180,16 +137,16 @@ class GPSDataToOdom(Node):
                 self.odom_msg.pose.pose.orientation.y = 0.0
                 self.odom_msg.pose.pose.orientation.z = 0.0
                 # Number of satellites
-                self.odom_msg.pose.covariance[0] = satellites
+                self.odom_msg.pose.covariance[0] = self.satelites
 
                 self.odom_pub.publish(self.odom_msg)
 
 
 def main(args=None):
     rclpy.init(args=args)
-    gtodom = GPSDataToOdom()
-    rclpy.spin(gtodom)
-    gtodom.destroy_node()
+    lonlattodom = lonlat_To_Odom()
+    rclpy.spin(lonlattodom)
+    lonlattodom.destroy_node()
     rclpy.shutdown()
 
 

@@ -4,7 +4,7 @@ import math
 import numpy as np
 import rclpy
 import tf2_ros
-from geometry_msgs.msg import TransformStamped, Twist
+from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
 from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
@@ -17,24 +17,25 @@ class ExtendedKalmanFilter(Node):
 
         self.GTheta = None
         self.GTheta0 = None
-        self.GPSthetayaw0 = 0
-        self.DGPStheta = 0
+        self.odom2theta = 0
+        self.G1Thetayaw0 = 0
+        self.DTheta = 0
         self.w = None
         self.Q = None  # Process noise covariance
         self.H = None
         self.R = None
-        self.R1 = 0  # High frequency sensor noise covariance
-        self.R2 = 0  # Low frequency sensor noise covariance
-        self.R3 = 0  # High frequency sensor(heading)
-        self.R4 = 0  # Low frequency sensor(heading)
+        self.R1 = 6e-2  # 0.06 odom1
+        self.R2 = 4e-2  # 0.04 odom2
+        self.R3 = 4     # odom1 Theta
+        self.R4 = 6     # odom2 theta
         self.P = None  # Initial covariance
         self.XX = None
         self.prev_time = None
         self.prev_pos = None
         self.Speed = 0
         self.SmpTime = 0.1
-        self.GpsXY = None
-        self.GPS_conut = 0
+        self.odom2XY = None
+        self.conut = 0
         self.GOffset = 0
         self.offsetyaw = 0
         self.combineyaw = 0
@@ -42,16 +43,15 @@ class ExtendedKalmanFilter(Node):
         self.combyaw = 0
         self.robot_orientationz = 0
         self.robot_orientationw = 0
-        self.Number_of_satellites = 0
 
         self.sub_a = self.create_subscription(
-            Odometry, '/odom_fast', self.sensor_a_callback, 10)
+            Odometry, '/odom', self.sensor_a_callback, 10)
         self.sub_b = self.create_subscription(
-            Odometry, '/odom_CLAS_movingbase', self.sensor_b_callback, 10)
+            Odometry, '/odom_fast', self.sensor_b_callback, 10)
 
-        self.declare_parameter("ekf_publish_TF", False)
+        self.declare_parameter("publish_TF", False)
         self.ekf_publish_TF = self.get_parameter(
-            "ekf_publish_TF").get_parameter_value().bool_value
+            "publish_TF").get_parameter_value().bool_value
 
         self.t = TransformStamped()
         self.br = tf2_ros.TransformBroadcaster(self)
@@ -61,7 +61,7 @@ class ExtendedKalmanFilter(Node):
 
         self.timer = self.create_timer(0.1, self.publish_fused_value)
 
-        self.get_logger().info("Start ekf_myself node")
+        self.get_logger().info("Start ekf_myself_noGPS node")
         self.get_logger().info("-------------------------")
 
     def orientation_to_yaw(self, z, w):
@@ -83,61 +83,31 @@ class ExtendedKalmanFilter(Node):
             self.SmpTime = current_time - self.prev_time
         else:
             self.SmpTime = 0.1
-
         self.prev_time = current_time
 
         current_pos = np.array([
             data.pose.pose.position.x,
             data.pose.pose.position.y
         ])
-
         if self.prev_pos is not None:
             distance = np.linalg.norm(current_pos - self.prev_pos)
             self.Speed = distance / self.SmpTime
         else:
             self.Speed = 0
-            
         self.prev_pos = current_pos
 
         self.GTheta = self.orientation_to_yaw(
             data.pose.pose.orientation.z, data.pose.pose.orientation.w)
 
     def sensor_b_callback(self, data):
-        self.GpsXY = np.array(
+        self.odom2XY = np.array(
             [data.pose.pose.position.x, data.pose.pose.position.y])
 
-        self.GPStheta = self.orientation_to_yaw(
+        self.odom2theta = self.orientation_to_yaw(
             data.pose.pose.orientation.z, data.pose.pose.orientation.w)
 
-        self.DGPStheta = self.GPStheta - self.GPSthetayaw0
-
-        self.GPSthetayaw0 = self.GPStheta
-
-        self.Number_of_satellites = data.pose.covariance[0]  #
-
-
-        # self.get_logger().info(f"self.Number_of_satellites: {self.Number_of_satellites}")
-
-    def determination_of_R(self):
-        if 0 <= self.Number_of_satellites < 4:  # Bad
-            self.R1 = 0.17**2  # FAST-LIO
-            self.R2 = 0.17**2  # CLAS-movingbase
-            self.R3 = 9     # GTheta
-            self.R4 = 1     # GPStheta
-        if 4 <= self.Number_of_satellites < 8:  # So-so...
-            self.R1 = 0.08**2  # FAST-LIO
-            self.R2 = 0.08**2  # CLAS-movingbase
-            self.R3 = 4     # GTheta
-            self.R4 = 6     # GPStheta
-
-        elif self.Number_of_satellites >= 8:  # Good!!!
-            self.R1 = 0.05**2  # FAST-LIO
-            self.R2 = 0.05**2  # CLAS-movingbase
-            self.R3 = 2     # GTheta
-            self.R4 = 8     # GPStheta
-
-        R = np.array([self.R1, self.R2, self.R3, self.R4])
-        return R
+        self.DTheta = self.odom2theta - self.G1Thetayaw0
+        self.G1Thetayaw0 = self.odom2theta
 
     def initialize(self, GTheta, SmpTime):
         self.GTheta0 = GTheta
@@ -149,10 +119,10 @@ class ExtendedKalmanFilter(Node):
         G0 = np.array([[1, 0], [0, 0], [0, 0], [0, 1]])
         self.P = G0 @ self.Q @ G0.T
 
-    def initializeGPS(self, GpsXY, GTheta, SmpTime):
+    def initialize_odom2(self, XY, GTheta, SmpTime):
         self.GTheta0 = GTheta
         self.XX = np.array(
-            [GpsXY[0], GpsXY[1], np.cos(GTheta), np.sin(GTheta)])
+            [XY[0], XY[1], np.cos(GTheta), np.sin(GTheta)])
         self.w = np.array([(1.379e-3)**2, (0.03 * np.pi / 180 * SmpTime)**2])
         self.H = np.array([[1, 0, 0, 0], [0, 1, 0, 0]])
         self.Q = np.array(
@@ -189,9 +159,9 @@ class ExtendedKalmanFilter(Node):
 
         return self.XX[:2]
 
-    def KalfGPSXY(self, Speed, SmpTime, GTheta, GpsXY, R1, R2):
+    def Kalfodom2XY(self, Speed, SmpTime, GTheta, XY, R1, R2):
         if self.H is None:
-            self.initializeGPS(GpsXY, GTheta, SmpTime)
+            self.initialize_odom2(XY, GTheta, SmpTime)
 
         self.R = np.array([[R1, 0], [0, R2]])
 
@@ -215,7 +185,7 @@ class ExtendedKalmanFilter(Node):
             [0, np.cos(GTheta)]
         ])
 
-        Y = np.array([GpsXY[0], GpsXY[1]])
+        Y = np.array([XY[0], XY[1]])
 
         self.XX = F @ self.XX  # filter equation
         self.P = F @ self.P @ F.T + G @ self.Q @ G.T  # Prior Error Covariance
@@ -292,20 +262,15 @@ class ExtendedKalmanFilter(Node):
 
     def publish_fused_value(self):
         if self.Speed is not None and self.SmpTime is not None and self.GTheta is not None:
-            R = self.determination_of_R()
-            self.R1 = R[0]
-            self.R2 = R[1]
-            self.R3 = R[2]
-            self.R4 = R[3]
-            if self.GpsXY is not None :
-                fused_value = self.KalfGPSXY(
-                    self.Speed, self.SmpTime, self.GTheta, self.GpsXY, self.R1, self.R2)
-                self.GPS_conut += 1
-                if self.GPS_conut % 20 == 0:
+            if self.odom2XY is not None:
+                fused_value = self.Kalfodom2XY(
+                    self.Speed, self.SmpTime, self.GTheta, self.odom2XY, self.R1, self.R2)
+                self.conut += 1
+                if self.conut % 20 == 0:
                     self.combyaw = self.combine_yaw(
-                        self.DGPStheta, self.GTheta, self.GPStheta, self.R3, self.R4)
+                        self.DTheta, self.GTheta, self.odom2theta, self.R3, self.R4)
                     self.offsetyaw = self.calculate_offset(
-                        self.combyaw, self.GTheta, self.GPStheta)
+                        self.combyaw, self.GTheta, self.odom2theta)
 
                 self.robot_yaw = self.GTheta + self.offsetyaw
                 if self.robot_yaw < -np.pi:

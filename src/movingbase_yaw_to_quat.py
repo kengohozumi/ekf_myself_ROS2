@@ -31,6 +31,9 @@ class MovingBaseNode(Node):
         self.movingbase_msg = Imu()
         self.movingbase_data = None
 
+        self.get_logger().info("Start movingbase_yaw_to_quat node")
+        self.get_logger().info("-------------------------")
+
     # def movingbase_callback(self, data):
     #    self.movingbase_data = data
 
@@ -59,7 +62,7 @@ class MovingBaseNode(Node):
                     i += 1
 
         if self.checksum(ackPacket, payloadlength):
-            self.get_logger().info("Checksum OK")
+            # self.get_logger().info("Checksum OK")
             nowpoint_info = self.parse_heading(ackPacket)
             return nowpoint_info
 
@@ -77,6 +80,7 @@ class MovingBaseNode(Node):
             return True
         else:
             self.get_logger().error("ACK Checksum Failure")
+            self.get_logger().error("!!!!-movingbase receive error-!!!!")
             return False
 
     def parse_heading(self, ackPacket):
@@ -134,9 +138,10 @@ class MovingBaseNode(Node):
             if heading >= 360:
                 heading -= 360
 
-            self.get_logger().info(f"robotheading: {heading}")
+            #self.get_logger().info(f"robotheading: {heading}")
 
             if self.count == 0:
+                self.get_logger().info(f"!!!----------robotheading: {heading} deg----------!!!")
                 self.first_heading = heading
                 self.count = 1
 
@@ -166,7 +171,7 @@ class MovingBaseNode(Node):
             self.heading_pub.publish(self.movingbase_msg)
             self.movingbase_data = None
         else:
-            self.get_logger().info("No movingbase_data")
+            self.get_logger().error("!!!!-movingbase data error-!!!!")
 
 
 def main(args=None):
